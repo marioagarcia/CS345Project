@@ -104,12 +104,13 @@ int fmsOpenFile(char* fileName, int rwMode)
 {
 	DirEntry dirEntry;
 	int cd = CDIR;
+	int sectorNumber;
 	char buffer[BYTES_PER_SECTOR];
 
 	int error = fmsGetDirEntry(fileName, &dirEntry);
 	if (!error)
 	{
-		//check if file is already there
+		//check if file is already open
 		for (int i = 0; i < NFILES; i++)
 		{
 			//if open then return error
@@ -118,23 +119,25 @@ int fmsOpenFile(char* fileName, int rwMode)
 			}
 		}
 		//fmsReadSector( sector to read from and the buffer to write to)
-		//error = fmsReadSector(buffer, ) //how to get the sector number
-		
-		//C_2_S pass in buffer
+		sectorNumber = C_2_S(dirEntry.startCluster);   // is this right?? how to get the sector number??
+		error = fmsReadSector(buffer, sectorNumber); 
 		
 		//Fill out fdEntry and put in OFTable and return the index
-		FDEntry * fdEntry;
-		int fdEntryIndex;
+		FDEntry * fdEntry = NULL;
+
 		//Find an open spot in the OFTable
 		for (int i = 0; i < NFILES; i++)
 		{
-			if (OFTable[i].name == 0)
+			if (OFTable[i].name == 0 || OFTable[i].name[0] == 0xe5)
 			{
-				//fdEntry = &OFTable[i];
-				fdEntryIndex = i;
+				fdEntry = &OFTable[i];
 			}
 		}
+		if (fdEntry == NULL) return ERR70; // Too many files opened
 
+
+
+		fdEntry->attributes = dirEntry.attributes;
 
 
 	}
