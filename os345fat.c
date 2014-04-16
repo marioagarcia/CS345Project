@@ -40,6 +40,8 @@ int fmsReadFile(int, char*, int);
 int fmsSeekFile(int, int);
 int fmsWriteFile(int, char*, int);
 
+void copyUint8(uint8 * dest, uint8 * src);
+
 // ***********************************************************************
 // ***********************************************************************
 //	Support functions available in os345p6.c
@@ -114,7 +116,7 @@ int fmsOpenFile(char* fileName, int rwMode)
 		for (int i = 0; i < NFILES; i++)
 		{
 			//if open then return error
-			if (OFTable[i].name == fileName) {
+			if (OFTable[i].name == dirEntry.name) {
 				return ERR62;
 			}
 		}
@@ -127,7 +129,7 @@ int fmsOpenFile(char* fileName, int rwMode)
 		//Find an open spot in the OFTable
 		for (int i = 0; i < NFILES; i++)
 		{
-			if (OFTable[i].name == 0 || OFTable[i].name[0] == 0xe5)
+			if (OFTable[i].name[0] == 0 || OFTable[i].name[0] == 0xe5)
 			{
 				fdEntry = &OFTable[i];
 				index = i;
@@ -136,8 +138,8 @@ int fmsOpenFile(char* fileName, int rwMode)
 		if (fdEntry == NULL) return ERR70; // Too many files opened
 
 		// fill in the fdEntry with the info in dirEntry
-		strcpy(fdEntry->name, fileName);
-		strcpy(fdEntry->extension, dirEntry.extension);
+		copyUint8(fdEntry->name, dirEntry.name); //this might not work because you need to parse out the name and the extension 
+		copyUint8(fdEntry->extension, dirEntry.extension); //this either
 		fdEntry->attributes = 0;
 		fdEntry->directoryCluster = CDIR;
 		fdEntry->startCluster = dirEntry.startCluster;
@@ -147,49 +149,12 @@ int fmsOpenFile(char* fileName, int rwMode)
 		fdEntry->mode = rwMode;
 		fdEntry->flags = 0;
 		if (rwMode == OPEN_APPEND)
-			fdEntry->fileIndex = 0;
-		else
 			fdEntry->fileIndex = dirEntry.fileSize;
+		else
+			fdEntry->fileIndex = 0;
 
 		//return a filedescriptor
 		return index;
-
-
-		//typedef struct
-		//{
-		//	uint8	name[8];	      	// file name
-		//	uint8	extension[3];		// extension
-		//	uint8	attributes;		   	// file attributes code
-		//	uint16	directoryCluster;	// directory cluster
-		//	uint16	startCluster;		// first cluster of the file
-		//	uint16	currentCluster;		// current cluster in buffer
-		//	uint32	fileSize;	   		// file size in bytes
-		//	int		pid;				// process who opened file
-		//	char	mode;				// access mode (read, read-only, write, append)
-		//	char	flags;				// flags
-		//	//   x80 = file altered
-		//	//   x40 = buffer altered
-		//	//   x20 = locked
-		//	//   x10 =
-		//	//   x08 = write protected
-		//	//   x04 = contiguous
-		//	//   x02 =
-		//	//   x01 =
-		//	uint32	fileIndex;			// next character position (from beg of file)
-		//	char buffer[BYTES_PER_SECTOR];	// file buffer
-		//} FDEntry;
-
-		//typedef struct
-		//{
-		//	uint8	name[8];	      	// File name
-		//	uint8	extension[3];		// Extension
-		//	uint8	attributes;			// Holds the attributes code
-		//	uint8	reserved[10];		// Reserved
-		//	FATTime time;			    // Time of last write
-		//	FATDate date;			    // Date of last write
-		//	uint16	startCluster;		// Pointer to the first cluster of the file.
-		//	uint32	fileSize;	   		// File size in bytes
-		//} DirEntry;
 
 		//this belongs to a different function
 		//sectorNumber = C_2_S(dirEntry.startCluster);   // is this right?? how to get the sector number??
@@ -199,6 +164,18 @@ int fmsOpenFile(char* fileName, int rwMode)
 	
 	
 } // end fmsOpenFile
+
+
+// ***********************************************************************
+// Helper functions
+
+void copyUint8(uint8 * dest, uint8 * src)
+{
+	for (int i = 0; i < 8; i++)
+	{
+		dest[i] = src[i];
+	}
+}
 
 // ***********************************************************************
 // ***********************************************************************
