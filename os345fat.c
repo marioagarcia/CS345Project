@@ -135,6 +135,7 @@ int fmsOpenFile(char* fileName, int rwMode)
 			{
 				fdEntry = &OFTable[i];
 				index = i;
+				break;
 			}
 		}
 		if (fdEntry == NULL) return ERR70; // Too many files opened
@@ -159,8 +160,7 @@ int fmsOpenFile(char* fileName, int rwMode)
 		return index;
 
 		//this belongs to a different function
-		//sectorNumber = C_2_S(dirEntry.startCluster);   // is this right?? how to get the sector number??
-		//error = fmsReadSector(buffer, sectorNumber); 
+		//error = fmsReadSector(buffer, C_2_S(dirEntry.startCluster)); 
 	}
 	
 } // end fmsOpenFile
@@ -222,83 +222,7 @@ int fmsReadFile(int fileDescriptor, char* buffer, int nBytes)
 	int error, nextCluster;
 	FDEntry* fdEntry;
 	int numBytesRead = 0;
-	unsigned int  bytesLesft, bufferIndex;
-
-	fdEntry = &OFTable[fileDescriptor];
-	if (fdEntry->name[0] == 0) return ERR63;
-	if (fdEntry->pid != curTask) return ERR85;
-	if ((fdEntry->mode == 1) || (fdEntry->mode == 2))
-		return ERR85; // illegal access (write or append only)
-
-	while (nBytes > 0)
-	{
-		// check for EOF
-		if (fdEntry->fileSize == fdEntry->fileIndex) return (numBytesRead ? numBytesRead : ERR66);
-
-		// fet index into slot bufer
-		bufferIndex = fdEntry->fileIndex % BYTES_PER_SECTOR;
-
-		// check for buffer boundary
-		if ((bufferIndex == 0) && (fdEntry->fileIndex || !fdEntry->currentCluster))
-		{
-			// check initial cluster
-			if (fdEntry->currentCluster == 0)
-			{
-				//read intitial cluster
-				if (fdEntry->startCluster == 0) return ERR66;  //eof
-				nextCluster = fdEntry->startCluster;
-				fdEntry->fileIndex = 0;
-			}
-			else
-			{
-				// get next cluster in FAT chain
-				nextCluster = getFatEntry(fdEntry->currentCluster, FAT1);
-				if (nextCluster == FAT_EOC) return numBytesRead; // end of read
-			}
-			if (fdEntry->flags & BUFFER_ALTERED)
-			{
-				//write out current Cluster if altered
-				if ((error = fmsWriteSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
-				fdEntry->flags &= ~BUFFER_ALTERED;
-			}
-			// read in next cluster
-			if ((error = fmsReadSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
-			fdEntry->currentCluster = nextCluster;
-		}
-
-		// limit bytes to read to minimum of what's left in buffer, what's left in file, and nBytes
-		bytesLesft = BYTES_PER_SECTOR - bufferIndex;
-		if (bytesLesft > nBytes) bytesLesft = nBytes;
-		if (bytesLesft > (fdEntry->fileSize - fdEntry->fileIndex))
-			bytesLesft = fdEntry->fileSize - fdEntry->fileIndex;
-
-		// move data from internal buffer to user buffer and update counts
-		memcpy(buffer, &fdEntry->buffer[bufferIndex], bytesLesft);
-		fdEntry->fileIndex += bytesLesft;
-		numBytesRead += bytesLesft;
-		buffer += bytesLesft;
-		nBytes -= bytesLesft;
-	}
-	return numBytesRead;	
-} // end fmsReadFile
-
-// ***********************************************************************
-// ***********************************************************************
-// This function writes nBytes bytes to the open file specified by fileDescriptor from
-// memory pointed to by buffer.
-// The fileDescriptor was returned by fmsOpenFile and is an index into the open file table.
-// Writing is always "overwriting" not "inserting" in the file and always writes forward
-// from the current file pointer position.
-// Return the number of bytes successfully written; otherwise, return the error number.
-//
-int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
-{
-
-	// copied read file 
-	int error, nextCluster;
-	FDEntry* fdEntry;
-	int numBytesRead = 0;
-	unsigned int  bytesLesft, bufferIndex;
+	unsigned int  bytesLeft, bufferIndex;
 
 	fdEntry = &OFTable[fileDescriptor];
 	if (fdEntry->name[0] == 0) return ERR63;
@@ -343,19 +267,72 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 		}
 
 		// limit bytes to read to minimum of what's left in buffer, what's left in file, and nBytes
-		bytesLesft = BYTES_PER_SECTOR - bufferIndex;
-		if (bytesLesft > nBytes) bytesLesft = nBytes;
-		if (bytesLesft > (fdEntry->fileSize - fdEntry->fileIndex))
-			bytesLesft = fdEntry->fileSize - fdEntry->fileIndex;
+		bytesLeft = BYTES_PER_SECTOR - bufferIndex;
+		if (bytesLeft > nBytes) bytesLeft = nBytes;
+		if (bytesLeft > (fdEntry->fileSize - fdEntry->fileIndex))
+			bytesLeft = fdEntry->fileSize - fdEntry->fileIndex;
 
 		// move data from internal buffer to user buffer and update counts
-		memcpy(buffer, &fdEntry->buffer[bufferIndex], bytesLesft);
-		fdEntry->fileIndex += bytesLesft;
-		numBytesRead += bytesLesft;
-		buffer += bytesLesft;
-		nBytes -= bytesLesft;
+		memcpy(buffer, &fdEntry->buffer[bufferIndex], bytesLeft);
+		fdEntry->fileIndex += bytesLeft;
+		numBytesRead += bytesLeft;
+		buffer += bytesLeft;
+		nBytes -= bytesLeft;
 	}
-	return numBytesRead;
+	return numBytesRead;	
+} // end fmsReadFile
+
+// ***********************************************************************
+// ***********************************************************************
+// This function writes nBytes bytes to the open file specified by fileDescriptor from
+// memory pointed to by buffer.
+// The fileDescriptor was returned by fmsOpenFile and is an index into the open file table.
+// Writing is always "overwriting" not "inserting" in the file and always writes forward
+// from the current file pointer position.
+// Return the number of bytes successfully written; otherwise, return the error number.
+//
+int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
+{
+	// copied read file 
+	//changed numBytesRead to numBytesWritten
+	int error, nextCluster;
+	FDEntry* fdEntry;
+	int numBytesWritten = 0;
+	unsigned int  bytesLeft, bufferIndex;
+
+	fdEntry = &OFTable[fileDescriptor];
+	if (fdEntry->name[0] == 0) return ERR63;
+	if (fdEntry->pid != curTask) return ERR85;
+	if (fdEntry->mode == 0)
+		return ERR84; // read only file
+
+	while (nBytes > 0)
+	{
+			//{
+			//	// get next cluster in FAT chain
+			//	nextCluster = getFatEntry(fdEntry->currentCluster, FAT1);
+			//	if (nextCluster == FAT_EOC) return ERR65; // no more space for files
+			//}
+			//// read in next cluster
+			//if ((error = fmsReadSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
+			//fdEntry->currentCluster = nextCluster;
+
+		//                write								
+		// limit bytes to read to minimum of what's left in buffer, what's left in file, and nBytes
+		
+		bytesLeft = BYTES_PER_SECTOR - fdEntry->fileIndex;
+		if (bytesLeft > nBytes) bytesLeft = nBytes;
+		if (bytesLeft > (BYTES_PER_SECTOR - bufferIndex))
+			bytesLeft = BYTES_PER_SECTOR - bufferIndex;
+
+		//move data from user buffer to internal buffer and update counts
+		memcpy(&fdEntry->buffer[bufferIndex], buffer, bytesLeft);
+		fdEntry->fileIndex += bytesLeft; 
+		numBytesWritten += bytesLeft;
+		//buffer -= bytesLeft;
+		nBytes -= bytesLeft;
+	}
+	return numBytesWritten;
 } // end fmsWriteFile
 
 // ***********************************************************************
