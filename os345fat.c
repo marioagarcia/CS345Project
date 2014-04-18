@@ -42,7 +42,7 @@ int fmsWriteFile(int, char*, int);
 
 void copyUint8(uint8 * dest, uint8 * src);
 int compUint8(uint8 * first, uint8 * second);
-
+void toCstr(uint8 * name, uint8 * ext, char * dest);
 
 // ***********************************************************************
 // ***********************************************************************
@@ -107,9 +107,7 @@ extern int curTask;							// current task #
 int fmsOpenFile(char* fileName, int rwMode)
 {
 	DirEntry dirEntry;
-	int cd = CDIR;
 	int sectorNumber;
-	char buffer[BYTES_PER_SECTOR];
 
 	int error = fmsGetDirEntry(fileName, &dirEntry);
 	if (!error)
@@ -122,9 +120,9 @@ int fmsOpenFile(char* fileName, int rwMode)
 				return ERR62;
 			}
 		}
-		
+
 		//Fill out fdEntry and put in OFTable and return the index
-		
+
 		FDEntry * fdEntry = NULL;
 		int index;
 
@@ -142,7 +140,7 @@ int fmsOpenFile(char* fileName, int rwMode)
 
 		// fill in the fdEntry with the info in dirEntry
 		copyUint8(fdEntry->name, dirEntry.name);				//this is a helper function I made
-		copyUint8(fdEntry->extension, dirEntry.extension);		
+		copyUint8(fdEntry->extension, dirEntry.extension);
 		fdEntry->attributes = 0;
 		fdEntry->directoryCluster = CDIR;
 		fdEntry->startCluster = dirEntry.startCluster;
@@ -158,11 +156,8 @@ int fmsOpenFile(char* fileName, int rwMode)
 
 		//return the filedescriptor
 		return index;
-
-		//this belongs to a different function
-		//error = fmsReadSector(buffer, C_2_S(dirEntry.startCluster)); 
 	}
-	
+
 } // end fmsOpenFile
 
 
@@ -235,7 +230,7 @@ int fmsReadFile(int fileDescriptor, char* buffer, int nBytes)
 		// check for EOF
 		if (fdEntry->fileSize == fdEntry->fileIndex) return (numBytesRead ? numBytesRead : ERR66);
 
-		// fet index into slot buffer
+		// get index into slot buffer
 		bufferIndex = fdEntry->fileIndex % BYTES_PER_SECTOR;
 
 		// check for buffer boundary
@@ -279,7 +274,7 @@ int fmsReadFile(int fileDescriptor, char* buffer, int nBytes)
 		buffer += bytesLeft;
 		nBytes -= bytesLeft;
 	}
-	return numBytesRead;	
+	return numBytesRead;
 } // end fmsReadFile
 
 // ***********************************************************************
@@ -293,47 +288,115 @@ int fmsReadFile(int fileDescriptor, char* buffer, int nBytes)
 //
 int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 {
-	// copied read file 
-	//changed numBytesRead to numBytesWritten
 	int error, nextCluster;
+	char fileName[12];
+	DirEntry dirEntry;
 	FDEntry* fdEntry;
 	int numBytesWritten = 0;
-	unsigned int  bytesLeft, bufferIndex;
+	unsigned int bytesLeft, bufferIndex;
 
 	fdEntry = &OFTable[fileDescriptor];
 	if (fdEntry->name[0] == 0) return ERR63;
 	if (fdEntry->pid != curTask) return ERR85;
-	if (fdEntry->mode == 0)
-		return ERR84; // read only file
+	if (fdEntry->mode == 0) return ERR84;
+
+	//Get a new FAT cluster if a new file
+	if (fdEntry->startCluster == 0)
+	{
+		int start = getFreeFatEntry();
+		setFatEntry(start, FAT_EOC, FAT1);
+		fdEntry->startCluster = start;
+	}
 
 	while (nBytes > 0)
 	{
-			//{
-			//	// get next cluster in FAT chain
-			//	nextCluster = getFatEntry(fdEntry->currentCluster, FAT1);
-			//	if (nextCluster == FAT_EOC) return ERR65; // no more space for files
-			//}
-			//// read in next cluster
-			//if ((error = fmsReadSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
-			//fdEntry->currentCluster = nextCluster;
+		int numClusters, fatEntry, i;
+		FDEntry* tempEntry = &OFTable[fileDescriptor];
 
-		//                write								
-		// limit bytes to read to minimum of what's left in buffer, what's left in file, and nBytes
-		
-		bytesLeft = BYTES_PER_SECTOR - fdEntry->fileIndex;
-		if (bytesLeft > nBytes) bytesLeft = nBytes;
-		if (bytesLeft > (BYTES_PER_SECTOR - bufferIndex))
-			bytesLeft = BYTES_PER_SECTOR - bufferIndex;
+		bufferIndex = fdEntry->fileIndex % BYTES_PER_SECTOR;
 
-		//move data from user buffer to internal buffer and update counts
+		tempEntry->currentCluster = tempEntry->startCluster;
+		numClusters = tempEntry->fileIndex / BYTES_PER_SECTOR;
+
+		for (i = 0; i < numClusters; i++)
+		{
+			nextCluster = getFatEntry(tempEntry->currentCluster, FAT1);
+
+			if (nextCluster == FAT_EOC)
+			{
+				fatEntry = getFreeFatEntry();
+				setFatEntry(fatEntry, FAT_EOC, FAT1);
+				setFatEntry(tempEntry->currentCluster, fatEntry, FAT1);
+				tempEntry->currentCluster = fatEntry;
+			}
+			else
+			{
+				tempEntry->currentCluster = nextCluster;
+			}
+		}
+
+		if ((error = fmsReadSector(tempEntry->buffer, C_2_S(tempEntry->currentCluster)))) return error;
+
+		//Get number of bytes we can write 
+		bytesLeft = BYTES_PER_SECTOR - bufferIndex;
+		if (bytesLeft > nBytes)
+			bytesLeft = nBytes;
+
 		memcpy(&fdEntry->buffer[bufferIndex], buffer, bytesLeft);
-		fdEntry->fileIndex += bytesLeft; 
-		numBytesWritten += bytesLeft;
-		//buffer -= bytesLeft;
+
+		buffer += bytesLeft;
 		nBytes -= bytesLeft;
+		numBytesWritten += bytesLeft;
+		fdEntry->fileIndex += bytesLeft;
+
+		if (fdEntry->fileIndex > fdEntry->fileSize)
+			fdEntry->fileSize = fdEntry->fileIndex;
+
+		fdEntry->flags &= BUFFER_ALTERED;
+
+		if ((error = fmsWriteSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
 	}
+
+	//populate the info back to the file??
+	toCstr(fdEntry->name, fdEntry->extension, fileName);
+
+	if (error = fmsGetDirEntry(fileName, &dirEntry)) return error;
+
+	dirEntry.startCluster =  fdEntry->startCluster;
+	dirEntry.fileSize = fdEntry->fileSize;
+	setDirTimeDate(&dirEntry);	
+
+	//make fmsSetDirEntry function to write back to disk
+
 	return numBytesWritten;
 } // end fmsWriteFile
+
+//typedef struct
+//{
+//	uint8	name[8];	      	// File name
+//	uint8	extension[3];		// Extension
+//	uint8	attributes;			// Holds the attributes code
+//	uint8	reserved[10];		// Reserved
+//	FATTime time;			    // Time of last write
+//	FATDate date;			    // Date of last write
+//	uint16	startCluster;		// Pointer to the first cluster of the file.
+//	uint32	fileSize;	   		// File size in bytes
+//} DirEntry;
+
+// ***********************************************************************
+//Write file helper functions
+
+int getFreeFatEntry()
+{
+	int i;
+	int numEntries = (BYTES_PER_SECTOR * NUM_FAT_SECTORS) / 1.5;
+	for (i = 2; i < numEntries; i++)
+	{
+		if (getFatEntry(i, FAT1) == 0)
+			return i;
+	}
+	return ERR65;
+}
 
 // ***********************************************************************
 // ***********************************************************************
@@ -343,12 +406,47 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 //
 int fmsCloseFile(int fileDescriptor)
 {
-	// ?? add code here
-	printf("\nfmsCloseFile Not Implemented");
+	int error, i, j;
+	char fileName[12];
+	DirEntry dirEntry;
+	FDEntry* fdEntry = &OFTable[fileDescriptor];
 
-	return ERR63;
+	if (fdEntry->name[0] == 0) return ERR63;  //File not open
+	if (fdEntry->pid != curTask) return ERR85;  //Illegal access
+
+	if (fdEntry->flags & BUFFER_ALTERED)  //Write out current cluster if altered
+	{
+		if (error = fmsWriteSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster))) return error;
+	}
+
+	fdEntry->name[0] = 0;
+
+	return 0;
 } // end fmsCloseFile
 
+// ***********************************************************************
+void toCstr(uint8 * name, uint8 * ext, char * dest)
+{
+	size_t i;
+
+	for (i = 0; i < 8; i++)
+	{
+		if (name[i] != 32)
+			dest[i] = name[i];
+		else break;
+	}
+
+	dest[i] = '.';
+
+	for (size_t j = 0; j < 3; j++)
+	{
+		if (ext[j] != 32)
+			dest[++i] = ext[j];
+		else break;
+	}
+
+	dest[++i] = 0;
+}
 
 // ***********************************************************************
 // ***********************************************************************
