@@ -44,6 +44,8 @@ void copyUint8(uint8 * dest, uint8 * src);
 int compUint8(uint8 * first, uint8 * second);
 void toCstr(uint8 * name, uint8 * ext, char * dest);
 
+int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir);
+
 // ***********************************************************************
 // ***********************************************************************
 //	Support functions available in os345p6.c
@@ -62,6 +64,7 @@ extern int isValidFileName(char* fileName);
 extern void printDirectoryEntry(DirEntry*);
 extern void fmsError(int);
 
+int getFreeFatEntry();
 extern int fmsReadSector(void* buffer, int sectorNumber);
 extern int fmsWriteSector(void* buffer, int sectorNumber);
 
@@ -352,7 +355,7 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 		if (fdEntry->fileIndex > fdEntry->fileSize)
 			fdEntry->fileSize = fdEntry->fileIndex;
 
-		fdEntry->flags &= BUFFER_ALTERED;
+		fdEntry->flags += BUFFER_ALTERED;
 
 		if ((error = fmsWriteSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
 	}
@@ -362,30 +365,78 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 
 	if (error = fmsGetDirEntry(fileName, &dirEntry)) return error;
 
-	dirEntry.startCluster =  fdEntry->startCluster;
+	dirEntry.startCluster = fdEntry->startCluster;
 	dirEntry.fileSize = fdEntry->fileSize;
-	setDirTimeDate(&dirEntry);	
+	setDirTimeDate(&dirEntry);
 
-	//make fmsSetDirEntry function to write this dirEntry back to disk 
+	int dirNum = 0;
+
+	if(error = fmsSetDirEntry(&dirNum, fileName, &dirEntry, CDIR)) return error;
 
 	return numBytesWritten;
 } // end fmsWriteFile
 
-int fmsSetDirEntry(char * fileName, DirEntry* dirEntry) //this doesn't work yet
-{
-	char buffer[BYTES_PER_SECTOR];
-	int dirIndex, dirSector, error, dirNum;
-	dirNum = 0;
-	int loop = dirNum / ENTRIES_PER_SECTOR;
-	int dirCluster = CDIR;
-
-	memcpy(&buffer[dirIndex * sizeof(DirEntry)], dirEntry, sizeof(DirEntry));
-}
-
-//} DirEntry;
-
 // ***********************************************************************
 //Write file helper functions
+
+int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir) //this doesn't work yet
+{
+	DirEntry tempDirEntry;
+	char buffer[BYTES_PER_SECTOR];
+	int dirIndex, dirSector, error;
+	int loop = *dirNum / ENTRIES_PER_SECTOR;
+	int dirCluster = dir;
+
+	while (1)
+	{	
+		// load directory sector
+		if (dir)
+		{	// sub directory
+			while (loop--)
+			{
+				dirCluster = getFatEntry(dirCluster, FAT1);
+				if (dirCluster == FAT_EOC) return ERR67;
+				if (dirCluster == FAT_BAD) return ERR54;
+				if (dirCluster < 2) return ERR54;
+			}
+			dirSector = C_2_S(dirCluster);
+		}
+		else
+		{	// root directory
+			dirSector = (*dirNum / ENTRIES_PER_SECTOR) + BEG_ROOT_SECTOR;
+			if (dirSector >= BEG_DATA_SECTOR) return ERR67;
+		}
+
+		// read sector into directory buffer
+		if (error = fmsReadSector(buffer, dirSector)) return error;
+
+		// find next matching directory entry
+		while (1)
+		{	// read directory entry
+			dirIndex = *dirNum % ENTRIES_PER_SECTOR;
+			memcpy(&tempDirEntry, &buffer[dirIndex * sizeof(DirEntry)], sizeof(DirEntry));
+			if (tempDirEntry.name[0] == 0) return ERR67;	// EOD
+			(*dirNum)++;                        		// prepare for next read
+			if (tempDirEntry.name[0] == 0xe5);     		// Deleted entry, go on...
+			else if (tempDirEntry.attributes == LONGNAME);
+			else if (fmsMask(mask, tempDirEntry.name, tempDirEntry.extension))
+			{
+				//populate buffer with the dirEntry passed in
+				memcpy(&buffer[dirIndex * sizeof(DirEntry)], dirEntry, sizeof(DirEntry));
+				
+				// write sector into directory buffer
+				if (error = fmsWriteSector(buffer, dirSector)) return error;
+				
+				return 0;
+			}
+			// break if sector boundary
+			if ((*dirNum % ENTRIES_PER_SECTOR) == 0) break;
+		}
+		// next directory sector/cluster
+		loop = 1;
+	}
+	return 0;
+}
 
 int getFreeFatEntry()
 {
