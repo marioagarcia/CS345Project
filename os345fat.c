@@ -366,21 +366,22 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 	dirEntry.fileSize = fdEntry->fileSize;
 	setDirTimeDate(&dirEntry);	
 
-	//make fmsSetDirEntry function to write back to disk
+	//make fmsSetDirEntry function to write this dirEntry back to disk 
 
 	return numBytesWritten;
 } // end fmsWriteFile
 
-//typedef struct
-//{
-//	uint8	name[8];	      	// File name
-//	uint8	extension[3];		// Extension
-//	uint8	attributes;			// Holds the attributes code
-//	uint8	reserved[10];		// Reserved
-//	FATTime time;			    // Time of last write
-//	FATDate date;			    // Date of last write
-//	uint16	startCluster;		// Pointer to the first cluster of the file.
-//	uint32	fileSize;	   		// File size in bytes
+int fmsSetDirEntry(char * fileName, DirEntry* dirEntry) //this doesn't work yet
+{
+	char buffer[BYTES_PER_SECTOR];
+	int dirIndex, dirSector, error, dirNum;
+	dirNum = 0;
+	int loop = dirNum / ENTRIES_PER_SECTOR;
+	int dirCluster = CDIR;
+
+	memcpy(&buffer[dirIndex * sizeof(DirEntry)], dirEntry, sizeof(DirEntry));
+}
+
 //} DirEntry;
 
 // ***********************************************************************
