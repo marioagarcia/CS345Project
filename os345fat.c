@@ -43,6 +43,10 @@ int fmsWriteFile(int, char*, int);
 void copyUint8(uint8 * dest, uint8 * src);
 int compUint8(uint8 * first, uint8 * second);
 void toCstr(uint8 * name, uint8 * ext, char * dest);
+int findSpaceForSector(DirEntry * buffer);
+int compareFileNames(DirEntry * buffer, char * fileName);
+int checkDirEmpty(DirEntry dirEntry);
+int deleteFromSector(DirEntry * buffer, char * fileName);
 
 int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir);
 
@@ -147,12 +151,12 @@ int fmsOpenFile(char* fileName, int rwMode)
 		fdEntry->attributes = 0;
 		fdEntry->directoryCluster = CDIR;
 		fdEntry->startCluster = dirEntry.startCluster;
-		fdEntry->currentCluster = dirEntry.startCluster;
+		fdEntry->currentCluster = 0;
 		fdEntry->fileSize = dirEntry.fileSize;
 		fdEntry->pid = curTask;
 		fdEntry->mode = rwMode;
 		fdEntry->flags = 0;
-		if (rwMode == OPEN_APPEND)
+		if (rwMode & OPEN_APPEND)
 			fdEntry->fileIndex = dirEntry.fileSize;
 		else
 			fdEntry->fileIndex = 0;
@@ -260,7 +264,7 @@ int fmsReadFile(int fileDescriptor, char* buffer, int nBytes)
 				fdEntry->flags &= ~BUFFER_ALTERED;
 			}
 			// read in next cluster
-			if ((error = fmsReadSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
+			if ((error = fmsReadSector(fdEntry->buffer, C_2_S(nextCluster)))) return error;
 			fdEntry->currentCluster = nextCluster;
 		}
 
@@ -292,7 +296,7 @@ int fmsReadFile(int fileDescriptor, char* buffer, int nBytes)
 int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 {
 	int error, nextCluster;
-	char fileName[12];
+	char fileName[13];
 	DirEntry dirEntry;
 	FDEntry* fdEntry;
 	int numBytesWritten = 0;
@@ -355,7 +359,7 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 		if (fdEntry->fileIndex > fdEntry->fileSize)
 			fdEntry->fileSize = fdEntry->fileIndex;
 
-		fdEntry->flags += BUFFER_ALTERED;
+		fdEntry->flags |= BUFFER_ALTERED;
 
 		if ((error = fmsWriteSector(fdEntry->buffer, C_2_S(fdEntry->currentCluster)))) return error;
 	}
@@ -371,7 +375,7 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 
 	int dirNum = 0;
 
-	if(error = fmsSetDirEntry(&dirNum, fileName, &dirEntry, CDIR)) return error;
+	if (error = fmsSetDirEntry(&dirNum, fileName, &dirEntry, CDIR)) return error;
 
 	return numBytesWritten;
 } // end fmsWriteFile
@@ -379,7 +383,7 @@ int fmsWriteFile(int fileDescriptor, char* buffer, int nBytes)
 // ***********************************************************************
 //Write file helper functions
 
-int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir) //this doesn't work yet
+int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir)
 {
 	DirEntry tempDirEntry;
 	char buffer[BYTES_PER_SECTOR];
@@ -388,7 +392,7 @@ int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir) //this 
 	int dirCluster = dir;
 
 	while (1)
-	{	
+	{
 		// load directory sector
 		if (dir)
 		{	// sub directory
@@ -423,10 +427,10 @@ int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir) //this 
 			{
 				//populate buffer with the dirEntry passed in
 				memcpy(&buffer[dirIndex * sizeof(DirEntry)], dirEntry, sizeof(DirEntry));
-				
-				// write sector into directory buffer
+
+				// write buffer into directory sector 
 				if (error = fmsWriteSector(buffer, dirSector)) return error;
-				
+
 				return 0;
 			}
 			// break if sector boundary
@@ -441,8 +445,8 @@ int fmsSetDirEntry(int *dirNum, char* mask, DirEntry* dirEntry, int dir) //this 
 int getFreeFatEntry()
 {
 	int i;
-	int numEntries = (BYTES_PER_SECTOR * NUM_FAT_SECTORS) / 1.5;
-	for (i = 2; i < numEntries; i++)
+	//int numEntries = (BYTES_PER_SECTOR * NUM_FAT_SECTORS) / 1.5;
+	for (i = BEG_DATA_SECTOR; i < CLUSTERS_PER_DISK; i++)
 	{
 		if (getFatEntry(i, FAT1) == 0)
 			return i;
@@ -481,8 +485,7 @@ void toCstr(uint8 * name, uint8 * ext, char * dest)
 {
 	size_t i;
 
-	for (i = 0; i < 8; i++)
-	{
+	for (i = 0; i < 8; i++)	{
 		if (name[i] != 32)
 			dest[i] = name[i];
 		else break;
@@ -490,8 +493,7 @@ void toCstr(uint8 * name, uint8 * ext, char * dest)
 
 	dest[i] = '.';
 
-	for (size_t j = 0; j < 3; j++)
-	{
+	for (size_t j = 0; j < 3; j++) {
 		if (ext[j] != 32)
 			dest[++i] = ext[j];
 		else break;
@@ -518,13 +520,152 @@ void toCstr(uint8 * name, uint8 * ext, char * dest)
 //
 int fmsDefineFile(char* fileName, int attribute)
 {
-	// ?? add code here
-	printf("\nfmsDefineFile Not Implemented");
+	if (!diskMounted) return ERR72;
 
-	return ERR72;
+	int freeIndex = -1;
+	int freeSector = -1;
+	DirEntry buffer[ENTRIES_PER_SECTOR];
+
+	if (CDIR == 0)
+	{
+		for (size_t i = BEG_ROOT_SECTOR; i < BEG_DATA_SECTOR; i++)
+		{
+			fmsReadSector(&buffer, i);
+			if (freeIndex == -1)
+			{
+				freeIndex = findSpaceForSector(&buffer);
+				freeSector = i;
+			}
+			if (compareFileNames(&buffer, fileName)) return ERR60;
+		}
+		if (freeIndex == -1)
+			return ERR65;
+	}
+	else
+	{
+		int currentCluster = CDIR;
+		int prevCluster;
+		while (currentCluster != FAT_EOC)
+		{
+			prevCluster = currentCluster;
+
+			fmsReadSector(&buffer, C_2_S(currentCluster));
+
+			if (freeIndex == -1)
+			{
+				freeIndex = findSpaceForSector(&buffer);
+				freeSector = C_2_S(currentCluster);
+			}
+
+			if (compareFileNames(&buffer, fileName)) return ERR60;
+
+			currentCluster = getFatEntry(currentCluster, FAT1);
+		}
+
+		if (freeIndex == -1)
+		{
+			freeIndex = 0;
+			int freeFatEntry = getFreeFatEntry();
+			setFatEntry(prevCluster, freeFatEntry, FAT1);
+			setFatEntry(freeFatEntry, FAT_EOC, FAT1);
+			freeSector = C_2_S(freeFatEntry);
+
+			memset(buffer, 0, sizeof(buffer));
+			fmsWriteSector(&buffer, freeSector);
+		}
+	}
+
+	fmsReadSector(&buffer, freeSector);
+	int i = 0;
+	for (i = 0; i < 8; i++)
+	{
+		buffer[freeIndex].name[i] = ' ';
+	}
+	for ( i = 0; i < 8; i++)
+	{
+		if (fileName[i] == 0)
+			break;
+		if (fileName[i] == '.')
+			break;
+		buffer[freeIndex].name[i] = fileName[i];
+	}
+	for (int j = 0; j < 3; j++)
+	{
+		buffer[freeIndex].extension[j] = ' ';
+	}
+	if (fileName[i++] == '.')
+	{
+		for (int k = 0; k < 3; i++, k++)
+		{
+			if (fileName[i] == 0) break;
+			buffer[freeIndex].extension[k] = fileName[i];
+		}
+	}
+
+	if (attribute & DIRECTORY)
+	{
+		int dirCluster = getFreeFatEntry();
+		if (dirCluster < 0) return ERR65;
+		setFatEntry(dirCluster, FAT_EOC, FAT1);
+		DirEntry dirBuffer[ENTRIES_PER_SECTOR];
+		memset(dirBuffer, 0, sizeof(dirBuffer));
+		memset(dirBuffer[0].name, 0x20, sizeof(dirBuffer[0].name));
+		memset(dirBuffer[1].name, 0x20, sizeof(dirBuffer[1].name));
+		memset(dirBuffer[0].extension, 0x20, sizeof(dirBuffer[0].extension));
+		memset(dirBuffer[1].extension, 0x20, sizeof(dirBuffer[1].extension));
+
+		// .
+		dirBuffer[0].name[0] = '.';
+		dirBuffer[0].attributes = DIRECTORY;
+		dirBuffer[0].startCluster = dirCluster;
+		setDirTimeDate(&dirBuffer[0]);
+
+
+		// ..
+		dirBuffer[1].name[0] = '.';
+		dirBuffer[1].name[1] = '.';
+		dirBuffer[1].attributes = DIRECTORY;
+		dirBuffer[1].startCluster = CDIR;
+		setDirTimeDate(&dirBuffer[1]);
+
+		fmsWriteSector(&dirBuffer, C_2_S(dirCluster));
+
+		buffer[freeIndex].startCluster = dirCluster;
+	}
+	else
+	{
+		buffer[freeIndex].startCluster = 0;
+	}
+	buffer[freeIndex].attributes = attribute;
+	buffer[freeIndex].fileSize = 0;
+	setDirTimeDate(&buffer[freeIndex]);
+	fmsWriteSector(&buffer, freeSector);
+	return 0;
 } // end fmsDefineFile
 
+int findSpaceForSector(DirEntry * buffer)
+{
+	for (size_t i = 0; i < ENTRIES_PER_SECTOR; i++)
+	{
+		if (buffer[i].name[0] == 0 || buffer[i].name[0] == 0xe5)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
 
+int compareFileNames(DirEntry * buffer, char * fileName)
+{
+	for (size_t i = 0; i < ENTRIES_PER_SECTOR; i++)
+	{
+		if (fmsMask(fileName, buffer[i].name, buffer[i].extension))
+		{
+			return ERR65;
+		}
+	}
+	return 0;
+}
 
 // ***********************************************************************
 // ***********************************************************************
@@ -535,12 +676,96 @@ int fmsDefineFile(char* fileName, int attribute)
 //
 int fmsDeleteFile(char* fileName)
 {
-	// ?? add code here
-	printf("\nfmsDeleteFile Not Implemented");
+	DirEntry buffer[ENTRIES_PER_SECTOR];
+	
+	if (!diskMounted) return ERR72;
 
+	if (CDIR == 0)
+	{
+		for (size_t i = BEG_ROOT_SECTOR; i < BEG_DATA_SECTOR; i++)
+		{
+			fmsReadSector(&buffer, i);
+			int error = deleteFromSector(&buffer, fileName);
+			switch (error)
+			{
+			case 0:
+				fmsWriteSector(&buffer, i);
+				return 0;
+				break;
+			case -1:
+				continue;
+				break;
+			default:
+				return error;
+			}
+		}
+	}
+	else
+	{
+		int currentCluster = CDIR;
+		while (currentCluster != FAT_EOC)
+		{
+			fmsReadSector(&buffer, C_2_S(currentCluster));
+			int error = deleteFromSector(&buffer, fileName);
+			switch (error)
+			{
+			case 0:
+				fmsWriteSector(&buffer, C_2_S(currentCluster));
+				return 0;
+				break;
+			case -1:
+				currentCluster = getFatEntry(currentCluster, FAT1);
+				break;
+			default:
+				return error;
+			}
+		}
+	}
 	return ERR61;
 } // end fmsDeleteFile
 
+int deleteFromSector(DirEntry * buffer, char * fileName)
+{
+	for (size_t i = 0; i < ENTRIES_PER_SECTOR; i++)
+	{
+		if (buffer[i].name[0] == 0) return -1;
+		if (fmsMask(fileName, buffer[i].name, buffer[i].extension))
+		{
+			if (!checkDirEmpty(buffer[i])) return ERR69;
+			buffer[i].name[0] = 0xe5;
+			int currentCluster = buffer[i].startCluster;
+			if (currentCluster == 0) return 0; //deleted a brand new file
+			while (currentCluster != FAT_EOC)
+			{
+				int tempCluster = getFatEntry(currentCluster, FAT1);
+				setFatEntry(currentCluster, 0, FAT1);
+				currentCluster = tempCluster;
+			}
+			return 0;
+		}
+	}
+	return -1;
+}
+
+int checkDirEmpty(DirEntry dirEntry)
+{
+	DirEntry tempDirEntry;
+	int index = 0;
+	char mask[20];
+	strcpy(mask, "*.*");
+
+	if (!(dirEntry.attributes & DIRECTORY)) return 1;
+	else
+	{
+		while (fmsGetNextDirEntry(&index, mask, &tempDirEntry, dirEntry.startCluster) != ERR67)
+		{
+			if (!fmsMask(".", tempDirEntry.name, tempDirEntry.extension) 
+				&& !fmsMask("..", tempDirEntry.name, tempDirEntry.extension))
+				return 0;
+		}
+	}
+	return 1;
+}
 
 // ***********************************************************************
 // ***********************************************************************
@@ -552,8 +777,39 @@ int fmsDeleteFile(char* fileName)
 //
 int fmsSeekFile(int fileDescriptor, int index)
 {
-	// ?? add code here
-	printf("\nfmsSeekFile Not Implemented");
+	FDEntry* currentFile = &OFTable[fileDescriptor];
 
-	return ERR63;
+	if (!diskMounted) return ERR72;
+
+	if (fileDescriptor < 0 || fileDescriptor > NFILES) return ERR52;
+
+
+	if (currentFile->name[0] == 0) return ERR63;
+
+	if (index > currentFile->fileSize || index < 0) return ERR80;
+
+	if (currentFile->flags & BUFFER_ALTERED)
+	{
+		int error;
+
+		if ((error = fmsWriteSector(currentFile->buffer, C_2_S(currentFile->currentCluster)))) return error;
+
+		currentFile->flags &= ~BUFFER_ALTERED;
+	}
+
+	currentFile->fileIndex = index;
+
+	int end = index / (BYTES_PER_SECTOR + 1);
+	currentFile->currentCluster = currentFile->startCluster;
+
+	for (size_t i = 0; i < end; i++)
+	{
+		currentFile->currentCluster = getFatEntry(currentFile->currentCluster, FAT1);
+	}
+
+	if (currentFile->currentCluster != FAT_EOC)
+		fmsReadSector(currentFile->buffer, C_2_S(currentFile->currentCluster));
+
+	return currentFile->fileIndex;
+
 } // end fmsSeekFile
